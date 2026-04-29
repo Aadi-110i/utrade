@@ -80,6 +80,63 @@ std::string CommandHandler::execute(const std::string& line,
         return store_.stats();
     }
 
+    // ── Extended commands ──────────────────────────────────────────────
+
+    if (cmd == "EXISTS") {
+        if (tokens.size() < 2)
+            return "(error) wrong number of arguments for 'EXISTS' command";
+        return store_.exists(tokens[1]);
+    }
+
+    if (cmd == "TYPE") {
+        if (tokens.size() < 2)
+            return "(error) wrong number of arguments for 'TYPE' command";
+        return store_.type(tokens[1]);
+    }
+
+    if (cmd == "RENAME") {
+        if (tokens.size() < 3)
+            return "(error) wrong number of arguments for 'RENAME' command";
+        return store_.rename(tokens[1], tokens[2]);
+    }
+
+    if (cmd == "EXPIRE") {
+        if (tokens.size() < 3)
+            return "(error) wrong number of arguments for 'EXPIRE' command";
+        try {
+            int sec = std::stoi(tokens[2]);
+            return store_.expire(tokens[1], sec);
+        } catch (...) {
+            return "(error) value is not an integer or out of range";
+        }
+    }
+
+    if (cmd == "PERSIST") {
+        if (tokens.size() < 2)
+            return "(error) wrong number of arguments for 'PERSIST' command";
+        return store_.persist(tokens[1]);
+    }
+
+    if (cmd == "APPEND") {
+        if (tokens.size() < 3)
+            return "(error) wrong number of arguments for 'APPEND' command";
+        return store_.append(tokens[1], tokens[2]);
+    }
+
+    if (cmd == "STRLEN") {
+        if (tokens.size() < 2)
+            return "(error) wrong number of arguments for 'STRLEN' command";
+        return store_.strlen(tokens[1]);
+    }
+
+    if (cmd == "DBSIZE") {
+        return store_.dbsize();
+    }
+
+    if (cmd == "FLUSHDB") {
+        return store_.flushdb();
+    }
+
     // ── Integer operations ─────────────────────────────────────────────
 
     if (cmd == "INCR") {
@@ -92,6 +149,28 @@ std::string CommandHandler::execute(const std::string& line,
         if (tokens.size() < 2)
             return "(error) wrong number of arguments for 'DECR' command";
         return store_.decr(tokens[1]);
+    }
+
+    if (cmd == "INCRBY") {
+        if (tokens.size() < 3)
+            return "(error) wrong number of arguments for 'INCRBY' command";
+        try {
+            long long delta = std::stoll(tokens[2]);
+            return store_.incrby(tokens[1], delta);
+        } catch (...) {
+            return "(error) value is not an integer or out of range";
+        }
+    }
+
+    if (cmd == "DECRBY") {
+        if (tokens.size() < 3)
+            return "(error) wrong number of arguments for 'DECRBY' command";
+        try {
+            long long delta = std::stoll(tokens[2]);
+            return store_.incrby(tokens[1], -delta);
+        } catch (...) {
+            return "(error) value is not an integer or out of range";
+        }
     }
 
     // ── List operations ────────────────────────────────────────────────
@@ -130,6 +209,12 @@ std::string CommandHandler::execute(const std::string& line,
         } catch (...) {
             return "(error) value is not an integer or out of range";
         }
+    }
+
+    if (cmd == "LLEN") {
+        if (tokens.size() < 2)
+            return "(error) wrong number of arguments for 'LLEN' command";
+        return store_.llen(tokens[1]);
     }
 
     // ── Pub/Sub ────────────────────────────────────────────────────────

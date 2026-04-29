@@ -335,6 +335,211 @@ std::string KVStore::stats() {
 }
 
 // ════════════════════════════════════════════════════════════════════════
+//  Extended Commands
+// ════════════════════════════════════════════════════════════════════════
+
+std::string KVStore::exists(const std::string& key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = store_.find(key);
+    if (it == store_.end()) return "(integer) 0";
+    if (isExpired(it->second)) {
+        lru_order_.erase(it->second.lru_it);
+        store_.erase(it);
+        ++expired_cleaned_;
+        return "(integer) 0";
+    }
+    return "(integer) 1";
+}
+
+std::string KVStore::type(const std::string& key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = store_.find(key);
+    if (it == store_.end()) return "none";
+    if (isExpired(it->second)) {
+        lru_order_.erase(it->second.lru_it);
+        store_.erase(it);
+        ++expired_cleaned_;
+        return "none";
+    }
+    return (it->second.type == Type::STRING) ? "string" : "list";
+}
+
+std::string KVStore::rename(const std::string& key, const std::string& newkey) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = store_.find(key);
+    if (it == store_.end()) return "(error) no such key";
+    if (isExpired(it->second)) {
+        lru_order_.erase(it->second.lru_it);
+        store_.erase(it);
+        ++expired_cleaned_;
+        return "(error) no such key";
+    }
+    if (key == newkey) return "OK";
+
+    // Remove old newkey if it exists
+    auto nit = store_.find(newkey);
+    if (nit != store_.end()) {
+        lru_order_.erase(nit->second.lru_it);
+        store_.erase(nit);
+    }
+
+    // Move entry
+    Entry e = std::move(it->second);
+    lru_order_.erase(e.lru_it);
+    store_.erase(it);
+
+    lru_order_.push_front(newkey);
+    e.lru_it = lru_order_.begin();
+    store_.emplace(newkey, std::move(e));
+    return "OK";
+}
+
+std::string KVStore::expire(const std::string& key, int seconds) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = store_.find(key);
+    if (it == store_.end()) return "(integer) 0";
+    if (isExpired(it->second)) {
+        lru_order_.erase(it->second.lru_it);
+        store_.erase(it);
+        ++expired_cleaned_;
+        return "(integer) 0";
+    }
+    it->second.has_expiry = true;
+    it->second.expiry = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+    expiry_pq_.push({key, it->second.expiry});
+    return "(integer) 1";
+}
+
+std::string KVStore::persist(const std::string& key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = store_.find(key);
+    if (it == store_.end()) return "(integer) 0";
+    if (isExpired(it->second)) {
+        lru_order_.erase(it->second.lru_it);
+        store_.erase(it);
+        ++expired_cleaned_;
+        return "(integer) 0";
+    }
+    if (!it->second.has_expiry) return "(integer) 0";
+    it->second.has_expiry = false;
+    return "(integer) 1";
+}
+
+std::string KVStore::append(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = store_.find(key);
+    if (it != store_.end() && isExpired(it->second)) {
+        lru_order_.erase(it->second.lru_it);
+        store_.erase(it);
+        ++expired_cleaned_;
+        it = store_.end();
+    }
+    if (it == store_.end()) {
+        if (max_keys_ > 0 && store_.size() >= max_keys_) evictLRU();
+        Entry e;
+        e.type = Type::STRING;
+        e.str_value = value;
+        lru_order_.push_front(key);
+        e.lru_it = lru_order_.begin();
+        store_.emplace(key, std::move(e));
+        return "(integer) " + std::to_string(value.size());
+    }
+    Entry& e = it->second;
+    if (e.type != Type::STRING)
+        return "(error) WRONGTYPE Operation against a key holding the wrong kind of value";
+    e.str_value += value;
+    touchLRU(key, e);
+    return "(integer) " + std::to_string(e.str_value.size());
+}
+
+std::string KVStore::strlen(const std::string& key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = store_.find(key);
+    if (it == store_.end()) return "(integer) 0";
+    if (isExpired(it->second)) {
+        lru_order_.erase(it->second.lru_it);
+        store_.erase(it);
+        ++expired_cleaned_;
+        return "(integer) 0";
+    }
+    if (it->second.type != Type::STRING)
+        return "(error) WRONGTYPE Operation against a key holding the wrong kind of value";
+    return "(integer) " + std::to_string(it->second.str_value.size());
+}
+
+std::string KVStore::flushdb() {
+    std::lock_guard<std::mutex> lk(mu_);
+    store_.clear();
+    lru_order_.clear();
+    while (!expiry_pq_.empty()) expiry_pq_.pop();
+    return "OK";
+}
+
+std::string KVStore::dbsize() {
+    std::lock_guard<std::mutex> lk(mu_);
+    return "(integer) " + std::to_string(store_.size());
+}
+
+std::string KVStore::incrby(const std::string& key, long long delta) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = store_.find(key);
+    if (it == store_.end()) {
+        if (max_keys_ > 0 && store_.size() >= max_keys_) evictLRU();
+        Entry e;
+        e.type = Type::STRING;
+        e.str_value = std::to_string(delta);
+        lru_order_.push_front(key);
+        e.lru_it = lru_order_.begin();
+        store_.emplace(key, std::move(e));
+        return "(integer) " + std::to_string(delta);
+    }
+    if (isExpired(it->second)) {
+        lru_order_.erase(it->second.lru_it);
+        store_.erase(it);
+        ++expired_cleaned_;
+        if (max_keys_ > 0 && store_.size() >= max_keys_) evictLRU();
+        Entry e;
+        e.type = Type::STRING;
+        e.str_value = std::to_string(delta);
+        lru_order_.push_front(key);
+        e.lru_it = lru_order_.begin();
+        store_.emplace(key, std::move(e));
+        return "(integer) " + std::to_string(delta);
+    }
+    Entry& e = it->second;
+    if (e.type != Type::STRING)
+        return "(error) WRONGTYPE Operation against a key holding the wrong kind of value";
+    try {
+        long long val = std::stoll(e.str_value) + delta;
+        e.str_value = std::to_string(val);
+        touchLRU(key, e);
+        return "(integer) " + e.str_value;
+    } catch (...) {
+        return "(error) value is not an integer or out of range";
+    }
+}
+
+std::string KVStore::llen(const std::string& key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = store_.find(key);
+    if (it == store_.end()) return "(integer) 0";
+    if (isExpired(it->second)) {
+        lru_order_.erase(it->second.lru_it);
+        store_.erase(it);
+        ++expired_cleaned_;
+        return "(integer) 0";
+    }
+    if (it->second.type != Type::LIST)
+        return "(error) WRONGTYPE Operation against a key holding the wrong kind of value";
+    return "(integer) " + std::to_string(it->second.list_value.size());
+}
+
+size_t KVStore::keyCount() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return store_.size();
+}
+
+// ════════════════════════════════════════════════════════════════════════
 //  Bonus – Integer Operations
 // ════════════════════════════════════════════════════════════════════════
 
